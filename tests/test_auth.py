@@ -5,7 +5,7 @@ from tests.conftest import bearer
 
 def test_signup_success(client, db_session_factory):
     resp = client.post(
-        "/api/v1/auth/signup", json={"email": "Ada@Example.com", "password": "S3cure-pass!"}
+        "/api/v1/auth/signup", json={"full_name": "Ada Lovelace", "email": "Ada@Example.com", "password": "S3cure-pass!"},
     )
     assert resp.status_code == 201
     body = resp.json()
@@ -23,7 +23,7 @@ def test_signup_success(client, db_session_factory):
 def test_signup_duplicate_email(client, signup, db_session_factory):
     signup("ada@example.com")
     resp = client.post(
-        "/api/v1/auth/signup", json={"email": "ADA@example.com", "password": "An0ther-pass!"}
+        "/api/v1/auth/signup", json={"full_name": "Ada L", "email": "ADA@example.com", "password": "An0ther-pass!"},
     )
     assert resp.status_code == 409
     with db_session_factory() as db:
@@ -31,7 +31,7 @@ def test_signup_duplicate_email(client, signup, db_session_factory):
 
 
 def test_signup_rejects_short_password(client):
-    resp = client.post("/api/v1/auth/signup", json={"email": "a@example.com", "password": "short"})
+    resp = client.post("/api/v1/auth/signup", json={"full_name": "A B", "email": "a@example.com", "password": "Sh0rt!"})
     assert resp.status_code == 422
 
 

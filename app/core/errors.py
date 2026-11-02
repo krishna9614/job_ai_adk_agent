@@ -43,3 +43,15 @@ class RateLimitedError(AppError):
 class AuthProviderUnavailableError(AppError):
     status_code = 503
     code = "auth_unavailable"
+
+
+class InvalidTokenError(AppError):
+    """An email link token (confirmation, recovery, email change) is invalid, expired or used."""
+
+    status_code = 400
+    code = "invalid_token"
+
+
+class PasswordReusedError(AppError):
+    status_code = 422
+    code = "password_reused"

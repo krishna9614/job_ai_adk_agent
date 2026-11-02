@@ -1,4 +1,5 @@
 import pytest
+from sqlalchemy import text
 
 from tests.conftest import bearer
 
@@ -6,8 +7,24 @@ PROFILE = "/api/v1/users/me/profile"
 
 
 @pytest.fixture()
-def token(signup):
-    return signup("ada@example.com")["session"]["access_token"]
+def signup_without_profile(signup, db_session_factory):
+    """Sign up, then drop the profile that sign-up seeds from the full name."""
+
+    def _signup(email: str) -> str:
+        body = signup(email)
+        with db_session_factory() as db:
+            db.execute(
+                text("DELETE FROM jobai.user_profiles WHERE user_id = :id"), {"id": body["user"]["id"]}
+            )
+            db.commit()
+        return body["session"]["access_token"]
+
+    return _signup
+
+
+@pytest.fixture()
+def token(signup_without_profile):
+    return signup_without_profile("ada@example.com")
 
 
 @pytest.mark.parametrize("method", ["get", "post", "patch"])
@@ -85,9 +102,9 @@ def test_update_missing_profile(client, token):
     assert client.patch(PROFILE, headers=bearer(token), json={"city": "Paris"}).status_code == 404
 
 
-def test_cross_user_profile_access(client, signup):
-    ada = signup("ada@example.com")["session"]["access_token"]
-    bob = signup("bob@example.com")["session"]["access_token"]
+def test_cross_user_profile_access(client, signup_without_profile):
+    ada = signup_without_profile("ada@example.com")
+    bob = signup_without_profile("bob@example.com")
     client.post(PROFILE, headers=bearer(ada), json={"first_name": "Ada"})
 
     # Bob only ever sees his own (non-existent) profile, and cannot alter Ada's.

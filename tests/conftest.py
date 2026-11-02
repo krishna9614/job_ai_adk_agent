@@ -75,8 +75,12 @@ def client(db_session_factory, auth_provider):
 
 @pytest.fixture()
 def signup(client):
-    def _signup(email: str = "ada@example.com", password: str = "S3cure-pass!") -> dict:
-        resp = client.post("/api/v1/auth/signup", json={"email": email, "password": password})
+    def _signup(
+        email: str = "ada@example.com", password: str = "S3cure-pass!", full_name: str = "Ada Lovelace"
+    ) -> dict:
+        resp = client.post(
+            "/api/v1/auth/signup", json={"full_name": full_name, "email": email, "password": password}
+        )
         assert resp.status_code == 201, resp.text
         return resp.json()
 
