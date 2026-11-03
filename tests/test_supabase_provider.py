@@ -4,11 +4,13 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from supabase_auth.errors import AuthApiError
 
 from app.core.errors import (
     AuthenticationError,
+    AuthProviderUnavailableError,
     ConflictError,
     ForbiddenError,
     InvalidTokenError,
@@ -144,3 +146,61 @@ def test_verify_reads_amr_methods(gotrue):
     }
     identity = ap.SupabaseAuthProvider("https://x.supabase.co", "anon").verify_access_token("t")
     assert identity.auth_methods == ("otp",)
+
+
+_NETWORK_ERRORS = [
+    httpx.ConnectTimeout("_ssl.c:1015: The handshake operation timed out"),
+    httpx.ConnectError("[Errno 11001] getaddrinfo failed"),
+    httpx.ReadTimeout("timed out"),
+]
+
+
+@pytest.mark.parametrize("error", _NETWORK_ERRORS, ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize(
+    ("client_method", "call"),
+    [
+        ("sign_in_with_password", lambda p: p.sign_in("ada@example.com", "S3cure-pass!")),
+        ("sign_up", lambda p: p.sign_up("ada@example.com", "S3cure-pass!", full_name="Ada")),
+        ("refresh_session", lambda p: p.refresh("refresh")),
+        ("reset_password_for_email", lambda p: p.send_password_reset("ada@example.com")),
+        ("resend", lambda p: p.resend_signup_confirmation("ada@example.com")),
+        ("get_claims", lambda p: p.verify_access_token("token")),
+    ],
+)
+def test_supabase_unreachable_is_503_not_500(gotrue, client_method, call, error):
+    getattr(gotrue, client_method).side_effect = error
+    with pytest.raises(AuthProviderUnavailableError, match="Couldn't reach"):
+        call(ap.SupabaseAuthProvider("https://x.supabase.co", "anon"))
+
+
+def test_sign_out_unreachable_is_503(gotrue):
+    gotrue.admin.sign_out.side_effect = httpx.ConnectTimeout("handshake timed out")
+    with pytest.raises(AuthProviderUnavailableError):
+        ap.SupabaseAuthProvider("https://x.supabase.co", "anon").sign_out("t", "global")
+
+
+def test_rest_calls_unreachable_is_503(monkeypatch, gotrue):
+    def boom(*_a, **_k):
+        raise httpx.ConnectTimeout("handshake timed out")
+
+    monkeypatch.setattr(ap.httpx, "request", boom)
+    provider = ap.SupabaseAuthProvider("https://x.supabase.co", "anon")
+    with pytest.raises(AuthProviderUnavailableError):
+        provider.verify_email_token("h", "recovery")
+    with pytest.raises(AuthProviderUnavailableError):
+        provider.update_password("t", "N3w-secret!")
+
+
+def test_login_endpoint_returns_503_json_when_supabase_unreachable(client, gotrue):
+    from app.api.deps import get_auth_provider
+    from app.main import app
+
+    gotrue.sign_in_with_password.side_effect = httpx.ConnectTimeout("handshake timed out")
+    app.dependency_overrides[get_auth_provider] = lambda: ap.SupabaseAuthProvider(
+        "https://x.supabase.co", "anon"
+    )
+    resp = client.post(
+        "/api/v1/auth/login", json={"email": "ada@example.com", "password": "S3cure-pass!"}
+    )
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "auth_unavailable"
