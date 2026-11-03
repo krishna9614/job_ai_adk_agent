@@ -28,6 +28,37 @@ tests/             pytest (Supabase mocked, real test database)
   HS256 keys), and the current user comes from its `sub` claim. No endpoint accepts a `user_id`.
 - Duplicate email returns `409`. A bad password returns `401`. An unconfirmed email returns `403`.
   A suspended or deleted account returns `403`. If Supabase is not configured, the API returns `503`.
+- **Sign-up** takes `full_name` (spaces allowed). It is stored in Supabase user metadata and seeds
+  the profile: first word → `first_name`, last word → `last_name`, the rest → `middle_name`.
+- **Password policy** (sign-up and reset, `app/schemas/auth.py`): 8–72 characters with an
+  uppercase letter, a lowercase letter, a number and a special character. Configure the same
+  policy in Supabase (**Authentication → Providers → Email → Password requirements**:
+  "Lowercase, uppercase letters, digits and symbols", minimum length 8).
+- **Email links** (verification, password reset, email change) are Supabase one-time tokens:
+  single-use and time-limited (`otp_expiry`). The frontend receives `token_hash` and posts it to
+  the API, which verifies it with Supabase. Invalid, expired or used links return
+  `400 {"code":"invalid_token"}`.
+- **Password reset**: `/auth/password/recovery` exchanges the link for a short-lived recovery
+  session; `/auth/password/reset` (Bearer recovery token) sets the new password. Supabase hashes
+  it and compares it with the stored bcrypt hash, so reusing the current password returns
+  `422 {"code":"password_reused"}`; plaintext passwords are never stored or compared here.
+  After a reset every session is revoked (global sign-out). A normal password-login session
+  cannot call the reset endpoint (`403`).
+- `forgot` and `resend` always return the same `202` message, whether or not the email is
+  registered.
+
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `POST /auth/signup` | — | `{full_name, email, password}` |
+| `POST /auth/login` | — | `{email, password}` |
+| `POST /auth/refresh` | — | `{refresh_token}` → new session (refresh tokens are single use) |
+| `POST /auth/logout` | Bearer | Revokes the current session |
+| `POST /auth/password/forgot` | — | `{email}` → sends the reset email |
+| `POST /auth/password/recovery` | — | `{token_hash}` → recovery session |
+| `POST /auth/password/reset` | Bearer (recovery) | `{password}` |
+| `POST /auth/verification/resend` | — | `{email}` → resends the verification email |
+| `POST /auth/email/confirm` | — | `{token_hash, type: signup\|email\|email_change}` → session |
+| `POST /users/me/email-change` | Bearer | `{email}` → sends confirmation link(s) |
 
 ### Supabase setup
 
@@ -38,6 +69,19 @@ tests/             pytest (Supabase mocked, real test database)
    - **On** (Supabase default): signup returns `201` with `session: null` and
      `email_confirmation_required: true`. Login works after the user clicks the email link.
    - **Off**: signup returns a session straight away. Use this for local development.
+4. **URL configuration**: set **Site URL** to the frontend (e.g. `http://localhost:3000`) and add it
+   to the redirect allow-list.
+5. **Email templates** must link to the frontend with `token_hash` (copy them from
+   `supabase/templates/`):
+   - Confirm signup: `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup`
+   - Reset password: `{{ .SiteURL }}/reset-password?token_hash={{ .TokenHash }}&type=recovery`
+   - Change email address: `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email_change`
+
+### Local Supabase (optional)
+
+`supabase/config.toml` configures a local stack (Supabase CLI + Docker) with the same password
+policy, email confirmations and the templates above. `supabase start` prints the API URL and
+publishable key; emails land in Mailpit at http://127.0.0.1:54324.
 
 ## Local setup
 
@@ -97,7 +141,7 @@ TOKEN=<session.access_token from signup/login>
 
 ```bash
 curl -s -X POST $API/auth/signup -H 'Content-Type: application/json' \
-  -d '{"email":"ada@example.com","password":"S3cure-pass!"}'
+  -d '{"full_name":"Ada King Lovelace","email":"ada@example.com","password":"S3cure-pass!"}'
 ```
 
 ```json

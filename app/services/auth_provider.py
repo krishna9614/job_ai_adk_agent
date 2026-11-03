@@ -5,17 +5,21 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
+import httpx
 from supabase import Client, create_client
 from supabase.lib.client_options import SyncClientOptions
 from supabase_auth.errors import AuthApiError, AuthError
+from supabase_auth.helpers import parse_auth_response
 
 from app.core.errors import (
     AuthenticationError,
     AuthProviderUnavailableError,
     ConflictError,
     ForbiddenError,
+    InvalidTokenError,
+    PasswordReusedError,
     RateLimitedError,
     ValidationFailedError,
 )
@@ -28,6 +32,8 @@ class AuthIdentity:
     auth_user_id: uuid.UUID
     email: str
     email_verified_at: datetime | None = None
+    # Authentication methods from the token's `amr` claim (e.g. "password", "otp", "recovery").
+    auth_methods: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -44,19 +50,39 @@ class AuthResult:
     session: AuthSession | None
 
 
+EmailTokenType = Literal["signup", "email", "email_change", "recovery"]
+
+
 class AuthProvider(Protocol):
-    def sign_up(self, email: str, password: str) -> AuthResult: ...
+    def sign_up(self, email: str, password: str, *, full_name: str | None = None) -> AuthResult: ...
 
     def sign_in(self, email: str, password: str) -> AuthResult: ...
+
+    def refresh(self, refresh_token: str) -> AuthResult: ...
+
+    def sign_out(self, access_token: str, scope: Literal["global", "local", "others"]) -> None: ...
 
     def verify_access_token(self, token: str) -> AuthIdentity:
         """Return the identity for a valid access token or raise AuthenticationError."""
         ...
 
+    def send_password_reset(self, email: str) -> None: ...
+
+    def resend_signup_confirmation(self, email: str) -> None: ...
+
+    def verify_email_token(self, token_hash: str, token_type: EmailTokenType) -> AuthResult | None:
+        """Consume a one-time email link token; session is None while an email change is half-done."""
+        ...
+
+    def update_password(self, access_token: str, password: str) -> None: ...
+
+    def request_email_change(self, access_token: str, email: str) -> None: ...
+
 
 _SIGNUP_CONFLICT_CODES = {"user_already_exists", "email_exists"}
 _RATE_LIMIT_CODES = {"over_request_rate_limit", "over_email_send_rate_limit"}
 _VALIDATION_CODES = {"weak_password", "email_address_invalid", "validation_failed"}
+_INVALID_LINK_MESSAGE = "This link is invalid, has expired or has already been used"
 
 
 class SupabaseAuthProvider:
@@ -77,9 +103,12 @@ class SupabaseAuthProvider:
             options=SyncClientOptions(auto_refresh_token=False, persist_session=False),
         )
 
-    def sign_up(self, email: str, password: str) -> AuthResult:
+    def sign_up(self, email: str, password: str, *, full_name: str | None = None) -> AuthResult:
+        credentials: dict = {"email": email, "password": password}
+        if full_name:
+            credentials["options"] = {"data": {"full_name": full_name}}
         try:
-            resp = self._new_client().auth.sign_up({"email": email, "password": password})
+            resp = self._new_client().auth.sign_up(credentials)
         except AuthApiError as exc:
             raise self._map_error(exc, conflict_codes=_SIGNUP_CONFLICT_CODES) from exc
         except AuthError as exc:
@@ -104,6 +133,105 @@ class SupabaseAuthProvider:
             raise AuthenticationError("Invalid email or password")
         return AuthResult(identity=self._identity(resp.user), session=self._session(resp.session))
 
+    def refresh(self, refresh_token: str) -> AuthResult:
+        try:
+            resp = self._new_client().auth.refresh_session(refresh_token)
+        except AuthApiError as exc:
+            if exc.status and exc.status >= 500:
+                raise AuthProviderUnavailableError("Authentication service error") from exc
+            raise AuthenticationError("Session has expired, please log in again") from exc
+        except AuthError as exc:
+            raise AuthenticationError("Session has expired, please log in again") from exc
+        if resp.user is None or resp.session is None:
+            raise AuthenticationError("Session has expired, please log in again")
+        return AuthResult(identity=self._identity(resp.user), session=self._session(resp.session))
+
+    def sign_out(self, access_token: str, scope: Literal["global", "local", "others"]) -> None:
+        """Revoke refresh tokens (this session, or every session for "global")."""
+        try:
+            self._new_client().auth.admin.sign_out(access_token, scope)
+        except AuthApiError as exc:
+            if exc.status and exc.status >= 500:
+                raise AuthProviderUnavailableError("Authentication service error") from exc
+            # Already signed out / expired token: nothing left to revoke.
+            logger.info("sign_out ignored: status=%s code=%s", exc.status, exc.code)
+
+    def send_password_reset(self, email: str) -> None:
+        try:
+            self._new_client().auth.reset_password_for_email(email)
+        except AuthApiError as exc:
+            raise self._map_error(exc) from exc
+        except AuthError as exc:
+            raise AuthProviderUnavailableError("Authentication service error") from exc
+
+    def resend_signup_confirmation(self, email: str) -> None:
+        try:
+            self._new_client().auth.resend({"type": "signup", "email": email})
+        except AuthApiError as exc:
+            raise self._map_error(exc) from exc
+        except AuthError as exc:
+            raise AuthProviderUnavailableError("Authentication service error") from exc
+
+    def verify_email_token(self, token_hash: str, token_type: EmailTokenType) -> AuthResult | None:
+        # Called over REST: supabase-py cannot parse GoTrue's reply to the first half of a
+        # double-confirmed email change (a message without a user or session).
+        resp, body = self._gotrue("POST", "verify", {"token_hash": token_hash, "type": token_type})
+        if resp.status_code >= 500:
+            raise AuthProviderUnavailableError("Authentication service error")
+        if resp.status_code == 429:
+            raise RateLimitedError("Too many requests, try again later")
+        if not resp.is_success:
+            raise InvalidTokenError(_INVALID_LINK_MESSAGE)
+        if not body.get("access_token"):
+            # Double-confirm email change: this address is confirmed, the other one is still pending.
+            return None
+        parsed = parse_auth_response(resp)
+        return AuthResult(identity=self._identity(parsed.user), session=self._session(parsed.session))
+
+    def update_password(self, access_token: str, password: str) -> None:
+        self._update_user(access_token, {"password": password})
+
+    def request_email_change(self, access_token: str, email: str) -> None:
+        self._update_user(access_token, {"email": email})
+
+    def _update_user(self, access_token: str, attributes: dict) -> None:
+        # GoTrue's PUT /user authorised by the caller's own access token (no service-role key).
+        resp, body = self._gotrue("PUT", "user", attributes, access_token)
+        if resp.is_success:
+            return
+        code = body.get("error_code") or body.get("code")
+        message = body.get("msg") or body.get("message") or body.get("error_description") or "Request failed"
+        exc = AuthApiError(message, resp.status_code, code if isinstance(code, str) else None)
+        if exc.code == "same_password":
+            raise PasswordReusedError("Your new password must be different from your current password")
+        if exc.code in {"email_exists", "user_already_exists"}:
+            raise ConflictError("An account with this email already exists")
+        if resp.status_code in (401, 403) and exc.code not in _VALIDATION_CODES:
+            raise AuthenticationError("Invalid or expired access token")
+        raise self._map_error(exc)
+
+    def _gotrue(
+        self, method: str, path: str, payload: dict, access_token: str | None = None
+    ) -> tuple[httpx.Response, dict]:
+        headers = {"apikey": self._anon_key}
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+        try:
+            resp = httpx.request(
+                method,
+                f"{self._url.rstrip('/')}/auth/v1/{path}",
+                json=payload,
+                headers=headers,
+                timeout=15,
+            )
+        except httpx.HTTPError as exc:
+            raise AuthProviderUnavailableError("Authentication service error") from exc
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        return resp, body if isinstance(body, dict) else {}
+
     def verify_access_token(self, token: str) -> AuthIdentity:
         try:
             with self._verifier_lock:
@@ -126,7 +254,11 @@ class SupabaseAuthProvider:
             auth_user_id = uuid.UUID(str(claims["sub"]))
         except ValueError as exc:
             raise AuthenticationError("Invalid or expired access token") from exc
-        return AuthIdentity(auth_user_id=auth_user_id, email=claims["email"])
+        amr = claims.get("amr") or []
+        methods = tuple(
+            str(entry.get("method")) if isinstance(entry, dict) else str(entry) for entry in amr
+        )
+        return AuthIdentity(auth_user_id=auth_user_id, email=claims["email"], auth_methods=methods)
 
     @staticmethod
     def _identity(user) -> AuthIdentity:

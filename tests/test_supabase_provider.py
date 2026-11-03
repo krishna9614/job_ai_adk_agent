@@ -7,7 +7,14 @@ from unittest.mock import MagicMock
 import pytest
 from supabase_auth.errors import AuthApiError
 
-from app.core.errors import AuthenticationError, ConflictError, ForbiddenError
+from app.core.errors import (
+    AuthenticationError,
+    ConflictError,
+    ForbiddenError,
+    InvalidTokenError,
+    PasswordReusedError,
+    ValidationFailedError,
+)
 from app.services import auth_provider as ap
 
 
@@ -82,3 +89,58 @@ def test_unconfigured_supabase_returns_503(client, monkeypatch):
     resp = client.post("/api/v1/auth/login", json={"email": "a@example.com", "password": "x"})
     assert resp.status_code == 503
     assert "SUPABASE_URL" in resp.json()["detail"]
+
+
+class _Resp:
+    def __init__(self, status: int, body: dict):
+        self.status_code = status
+        self._body = body
+        self.is_success = 200 <= status < 300
+        self.content = __import__("json").dumps(body).encode()
+
+    def json(self):
+        return self._body
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (422, {"error_code": "same_password", "msg": "New password should be different"}, PasswordReusedError),
+        (422, {"error_code": "weak_password", "msg": "Password is too weak"}, ValidationFailedError),
+        (422, {"error_code": "email_exists", "msg": "exists"}, ConflictError),
+        (401, {"error_code": "bad_jwt", "msg": "invalid JWT"}, AuthenticationError),
+    ],
+)
+def test_update_password_error_mapping(monkeypatch, gotrue, status, body, expected):
+    monkeypatch.setattr(ap.httpx, "request", lambda *a, **k: _Resp(status, body))
+    with pytest.raises(expected):
+        ap.SupabaseAuthProvider("https://x.supabase.co", "anon").update_password("t", "N3w-secret!")
+
+
+@pytest.mark.parametrize("status", [400, 403, 404])
+def test_verify_email_token_rejections_are_invalid_token(monkeypatch, gotrue, status):
+    monkeypatch.setattr(
+        ap.httpx, "request", lambda *a, **k: _Resp(status, {"error_code": "otp_expired", "msg": "expired"})
+    )
+    with pytest.raises(InvalidTokenError):
+        ap.SupabaseAuthProvider("https://x.supabase.co", "anon").verify_email_token("h", "recovery")
+
+
+def test_verify_email_token_half_confirmed_email_change(monkeypatch, gotrue):
+    monkeypatch.setattr(
+        ap.httpx, "request", lambda *a, **k: _Resp(200, {"msg": "Confirmation link accepted", "code": 200})
+    )
+    assert ap.SupabaseAuthProvider("https://x.supabase.co", "anon").verify_email_token("h", "email_change") is None
+
+
+def test_verify_reads_amr_methods(gotrue):
+    gotrue.get_claims.return_value = {
+        "claims": {
+            "sub": str(uuid.uuid4()),
+            "email": "a@example.com",
+            "role": "authenticated",
+            "amr": [{"method": "otp", "timestamp": 1}],
+        }
+    }
+    identity = ap.SupabaseAuthProvider("https://x.supabase.co", "anon").verify_access_token("t")
+    assert identity.auth_methods == ("otp",)
