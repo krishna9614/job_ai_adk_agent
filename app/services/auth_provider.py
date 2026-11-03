@@ -85,6 +85,14 @@ _VALIDATION_CODES = {"weak_password", "email_address_invalid", "validation_faile
 _INVALID_LINK_MESSAGE = "This link is invalid, has expired or has already been used"
 
 
+def _unreachable(exc: httpx.HTTPError) -> AuthProviderUnavailableError:
+    """Network failure talking to Supabase (DNS, TLS handshake, timeout): a 503, never a 500."""
+    logger.warning("Supabase Auth unreachable: %s: %s", type(exc).__name__, exc)
+    return AuthProviderUnavailableError(
+        "Your internet connection seems slow. Please try again in a moment."
+    )
+
+
 class SupabaseAuthProvider:
     """Supabase Auth via the public (anon/publishable) key."""
 
@@ -113,6 +121,8 @@ class SupabaseAuthProvider:
             raise self._map_error(exc, conflict_codes=_SIGNUP_CONFLICT_CODES) from exc
         except AuthError as exc:
             raise AuthProviderUnavailableError("Authentication service error") from exc
+        except httpx.HTTPError as exc:
+            raise _unreachable(exc) from exc
         user = resp.user
         # With email confirmation enabled, Supabase hides existing accounts by returning
         # a user with no identities instead of an error.
@@ -129,6 +139,8 @@ class SupabaseAuthProvider:
             raise self._map_error(exc) from exc
         except AuthError as exc:
             raise AuthProviderUnavailableError("Authentication service error") from exc
+        except httpx.HTTPError as exc:
+            raise _unreachable(exc) from exc
         if resp.user is None or resp.session is None:
             raise AuthenticationError("Invalid email or password")
         return AuthResult(identity=self._identity(resp.user), session=self._session(resp.session))
@@ -142,6 +154,8 @@ class SupabaseAuthProvider:
             raise AuthenticationError("Session has expired, please log in again") from exc
         except AuthError as exc:
             raise AuthenticationError("Session has expired, please log in again") from exc
+        except httpx.HTTPError as exc:
+            raise _unreachable(exc) from exc
         if resp.user is None or resp.session is None:
             raise AuthenticationError("Session has expired, please log in again")
         return AuthResult(identity=self._identity(resp.user), session=self._session(resp.session))
@@ -155,6 +169,8 @@ class SupabaseAuthProvider:
                 raise AuthProviderUnavailableError("Authentication service error") from exc
             # Already signed out / expired token: nothing left to revoke.
             logger.info("sign_out ignored: status=%s code=%s", exc.status, exc.code)
+        except httpx.HTTPError as exc:
+            raise _unreachable(exc) from exc
 
     def send_password_reset(self, email: str) -> None:
         try:
@@ -163,6 +179,8 @@ class SupabaseAuthProvider:
             raise self._map_error(exc) from exc
         except AuthError as exc:
             raise AuthProviderUnavailableError("Authentication service error") from exc
+        except httpx.HTTPError as exc:
+            raise _unreachable(exc) from exc
 
     def resend_signup_confirmation(self, email: str) -> None:
         try:
@@ -171,6 +189,8 @@ class SupabaseAuthProvider:
             raise self._map_error(exc) from exc
         except AuthError as exc:
             raise AuthProviderUnavailableError("Authentication service error") from exc
+        except httpx.HTTPError as exc:
+            raise _unreachable(exc) from exc
 
     def verify_email_token(self, token_hash: str, token_type: EmailTokenType) -> AuthResult | None:
         # Called over REST: supabase-py cannot parse GoTrue's reply to the first half of a
@@ -225,7 +245,7 @@ class SupabaseAuthProvider:
                 timeout=15,
             )
         except httpx.HTTPError as exc:
-            raise AuthProviderUnavailableError("Authentication service error") from exc
+            raise _unreachable(exc) from exc
         try:
             body = resp.json()
         except ValueError:
@@ -242,6 +262,8 @@ class SupabaseAuthProvider:
             raise AuthenticationError("Invalid or expired access token") from exc
         except AuthError as exc:
             raise AuthenticationError("Invalid or expired access token") from exc
+        except httpx.HTTPError as exc:  # JWKS / Auth server unreachable: not the token's fault
+            raise _unreachable(exc) from exc
         except Exception as exc:  # malformed tokens raise non-auth exceptions while decoding
             logger.debug("token verification failed: %s", exc)
             raise AuthenticationError("Invalid or expired access token") from exc
