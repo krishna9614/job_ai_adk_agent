@@ -169,7 +169,7 @@ _NETWORK_ERRORS = [
 )
 def test_supabase_unreachable_is_503_not_500(gotrue, client_method, call, error):
     getattr(gotrue, client_method).side_effect = error
-    with pytest.raises(AuthProviderUnavailableError, match="Couldn't reach"):
+    with pytest.raises(AuthProviderUnavailableError, match="internet connection seems slow"):
         call(ap.SupabaseAuthProvider("https://x.supabase.co", "anon"))
 
 
@@ -203,4 +203,7 @@ def test_login_endpoint_returns_503_json_when_supabase_unreachable(client, gotru
         "/api/v1/auth/login", json={"email": "ada@example.com", "password": "S3cure-pass!"}
     )
     assert resp.status_code == 503
-    assert resp.json()["code"] == "auth_unavailable"
+    assert resp.json() == {
+        "detail": "Your internet connection seems slow. Please try again in a moment.",
+        "code": "auth_unavailable",
+    }

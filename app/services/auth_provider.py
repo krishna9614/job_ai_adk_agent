@@ -89,7 +89,7 @@ def _unreachable(exc: httpx.HTTPError) -> AuthProviderUnavailableError:
     """Network failure talking to Supabase (DNS, TLS handshake, timeout): a 503, never a 500."""
     logger.warning("Supabase Auth unreachable: %s: %s", type(exc).__name__, exc)
     return AuthProviderUnavailableError(
-        "Couldn't reach the authentication service. Check your connection and try again."
+        "Your internet connection seems slow. Please try again in a moment."
     )
 
 
