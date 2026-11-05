@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import (
     AppError,
     AuthenticationError,
@@ -12,6 +13,7 @@ from app.core.errors import (
     InvalidTokenError,
     ValidationFailedError,
 )
+from app.core.recovery_tokens import open_recovery_token, seal_recovery_token
 from app.models import User
 from app.repositories.profile_repository import ProfileRepository
 from app.schemas.auth import split_full_name
@@ -23,6 +25,11 @@ logger = logging.getLogger(__name__)
 # `amr` methods of sessions created from an emailed one-time link (Supabase records "otp" for
 # recovery links); password logins ("password") cannot set a password without the old one.
 _EMAIL_LINK_METHODS = {"recovery", "otp"}
+
+
+def _reset_redirect_url() -> str | None:
+    frontend_url = get_settings().frontend_url
+    return f"{frontend_url.rstrip('/')}/reset-password" if frontend_url else None
 
 
 @dataclass(frozen=True)
@@ -71,7 +78,10 @@ class AuthService:
 
     def request_password_reset(self, email: str) -> None:
         """Always succeeds from the caller's view so responses never reveal registered emails."""
-        self._quietly(lambda: self.provider.send_password_reset(email), "password reset")
+        redirect_to = _reset_redirect_url()
+        self._quietly(
+            lambda: self.provider.send_password_reset(email, redirect_to=redirect_to), "password reset"
+        )
 
     def resend_verification(self, email: str) -> None:
         self._quietly(lambda: self.provider.resend_signup_confirmation(email), "verification resend")
@@ -85,15 +95,22 @@ class AuthService:
         )
         return AuthOutcome(user=user, session=result.session)
 
-    def start_password_recovery(self, token_hash: str) -> AuthSession:
-        """Exchange a one-time recovery link for a short-lived session used only to set a password."""
+    def start_password_recovery(self, token_hash: str) -> str:
+        """Exchange a one-time recovery link for a sealed 15-minute ticket that can only set a password.
+
+        The Supabase recovery session stays inside the backend, so it can never be used to call
+        other endpoints.
+        """
         result = self.provider.verify_email_token(token_hash, "recovery")
         if result is None or result.session is None:
             raise InvalidTokenError("This link is invalid, has expired or has already been used")
         self.user_service.sync_authenticated_user(result.identity)
-        return result.session
+        return seal_recovery_token(result.session.access_token)
 
-    def reset_password(self, recovery_token: str, password: str) -> None:
+    def reset_password(self, recovery_ticket: str, password: str) -> None:
+        recovery_token = open_recovery_token(recovery_ticket)
+        if recovery_token is None:
+            raise AuthenticationError("Your reset session has expired. Please request a new reset link.")
         identity = self.provider.verify_access_token(recovery_token)
         if not _EMAIL_LINK_METHODS.intersection(identity.auth_methods):
             raise ForbiddenError("Open the password reset link from your email to set a new password")

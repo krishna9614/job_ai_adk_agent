@@ -38,6 +38,7 @@ class FakeAuthProvider:
         self._refresh: dict[str, uuid.UUID] = {}
         self._email_tokens: dict[str, tuple[str, uuid.UUID, str, datetime]] = {}
         self.outbox: list[SentEmail] = []
+        self.reset_redirects: list[str | None] = []
 
     # Helpers for tests -----------------------------------------------------------------------
 
@@ -121,7 +122,8 @@ class FakeAuthProvider:
             raise AuthenticationError("Invalid or expired access token")
         return entry[0]
 
-    def send_password_reset(self, email: str) -> None:
+    def send_password_reset(self, email: str, redirect_to: str | None = None) -> None:
+        self.reset_redirects.append(redirect_to)
         account = self._accounts.get(email.lower())
         if account is not None:
             self._send("recovery", account, account.email)

@@ -66,7 +66,7 @@ class AuthProvider(Protocol):
         """Return the identity for a valid access token or raise AuthenticationError."""
         ...
 
-    def send_password_reset(self, email: str) -> None: ...
+    def send_password_reset(self, email: str, redirect_to: str | None = None) -> None: ...
 
     def resend_signup_confirmation(self, email: str) -> None: ...
 
@@ -172,9 +172,10 @@ class SupabaseAuthProvider:
         except httpx.HTTPError as exc:
             raise _unreachable(exc) from exc
 
-    def send_password_reset(self, email: str) -> None:
+    def send_password_reset(self, email: str, redirect_to: str | None = None) -> None:
+        options = {"redirect_to": redirect_to} if redirect_to else {}
         try:
-            self._new_client().auth.reset_password_for_email(email)
+            self._new_client().auth.reset_password_for_email(email, options)
         except AuthApiError as exc:
             raise self._map_error(exc) from exc
         except AuthError as exc:

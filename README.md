@@ -38,12 +38,16 @@ tests/             pytest (Supabase mocked, real test database)
   single-use and time-limited (`otp_expiry`). The frontend receives `token_hash` and posts it to
   the API, which verifies it with Supabase. Invalid, expired or used links return
   `400 {"code":"invalid_token"}`.
-- **Password reset**: `/auth/password/recovery` exchanges the link for a short-lived recovery
-  session; `/auth/password/reset` (Bearer recovery token) sets the new password. Supabase hashes
+- **Password reset**: `/auth/password/recovery` verifies the link's `token_hash` with Supabase
+  (`type=recovery`) and returns an encrypted 15-minute `recovery_token` (needs
+  `RECOVERY_TOKEN_SECRET`). The Supabase recovery session never leaves the backend, and the ticket is
+  not a JWT, so it cannot authenticate any other endpoint. `/auth/password/reset` (Bearer
+  `recovery_token`) sets the new password. Supabase hashes
   it and compares it with the stored bcrypt hash, so reusing the current password returns
   `422 {"code":"password_reused"}`; plaintext passwords are never stored or compared here.
-  After a reset every session is revoked (global sign-out). A normal password-login session
-  cannot call the reset endpoint (`403`).
+  After a reset every session is revoked (global sign-out), which also makes the ticket
+  useless. Normal access tokens and expired or forged tickets get `401`. Reset emails ask Supabase
+  to redirect to `$FRONTEND_URL/reset-password`.
 - `forgot` and `resend` always return the same `202` message, whether or not the email is
   registered.
 
@@ -54,8 +58,8 @@ tests/             pytest (Supabase mocked, real test database)
 | `POST /auth/refresh` | — | `{refresh_token}` → new session (refresh tokens are single use) |
 | `POST /auth/logout` | Bearer | Revokes the current session |
 | `POST /auth/password/forgot` | — | `{email}` → sends the reset email |
-| `POST /auth/password/recovery` | — | `{token_hash}` → recovery session |
-| `POST /auth/password/reset` | Bearer (recovery) | `{password}` |
+| `POST /auth/password/recovery` | — | `{token_hash}` → `{recovery_token, expires_in: 900}` |
+| `POST /auth/password/reset` | Bearer `recovery_token` | `{password}` |
 | `POST /auth/verification/resend` | — | `{email}` → resends the verification email |
 | `POST /auth/email/confirm` | — | `{token_hash, type: signup\|email\|email_change}` → session |
 | `POST /users/me/email-change` | Bearer | `{email}` → sends confirmation link(s) |
@@ -69,10 +73,13 @@ tests/             pytest (Supabase mocked, real test database)
    - **On** (Supabase default): signup returns `201` with `session: null` and
      `email_confirmation_required: true`. Login works after the user clicks the email link.
    - **Off**: signup returns a session straight away. Use this for local development.
-4. **URL configuration**: set **Site URL** to the frontend (e.g. `http://localhost:3000`) and add it
-   to the redirect allow-list.
-5. **Email templates** must link to the frontend with `token_hash` (copy them from
-   `supabase/templates/`):
+4. **Authentication → URL Configuration**: set **Site URL** to the frontend (`http://localhost:3000`
+   locally) and add `http://localhost:3000/**` to **Redirect URLs**. Set `FRONTEND_URL` to the same
+   origin.
+5. **Authentication → Email Templates** must link to the frontend with `token_hash` (copy them from
+   `supabase/templates/`). Supabase's default templates use `{{ .ConfirmationURL }}`: Supabase then
+   verifies the link itself and sends the user to the Site URL, not to `/reset-password`, so the
+   reset page never opens.
    - Confirm signup: `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=signup`
    - Reset password: `{{ .SiteURL }}/reset-password?token_hash={{ .TokenHash }}&type=recovery`
    - Change email address: `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email_change`
