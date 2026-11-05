@@ -118,7 +118,9 @@ class ConfirmEmailResponse(BaseModel):
 
 
 class RecoveryResponse(BaseModel):
-    session: TokenResponse
+    # Opaque, encrypted ticket for POST /auth/password/reset; not a Supabase token.
+    recovery_token: str
+    expires_in: int
 
 
 class MessageResponse(BaseModel):

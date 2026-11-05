@@ -92,7 +92,7 @@ def _recovery_session(client, auth_provider, email="ada@example.com"):
     token_hash = auth_provider.last_email("recovery").token_hash
     resp = client.post(f"{AUTH}/password/recovery", json={"token_hash": token_hash})
     assert resp.status_code == 200, resp.text
-    return token_hash, resp.json()["session"]["access_token"]
+    return token_hash, resp.json()["recovery_token"]
 
 
 def test_password_reset_flow_revokes_sessions(client, signup, auth_provider):
@@ -132,8 +132,53 @@ def test_password_reset_enforces_policy(client, signup, auth_provider):
 def test_password_reset_requires_recovery_session(client, signup):
     token = signup()["session"]["access_token"]
     resp = client.post(f"{AUTH}/password/reset", headers=bearer(token), json={"password": NEW_PASSWORD})
-    assert resp.status_code == 403
+    assert resp.status_code == 401
     assert client.post(f"{AUTH}/password/reset", json={"password": NEW_PASSWORD}).status_code == 401
+
+
+def test_recovery_returns_sealed_ticket_not_supabase_tokens(client, signup, auth_provider):
+    signup()
+    client.post(f"{AUTH}/password/forgot", json={"email": "ada@example.com"})
+    resp = client.post(
+        f"{AUTH}/password/recovery", json={"token_hash": auth_provider.last_email("recovery").token_hash}
+    )
+    assert resp.status_code == 200
+    assert set(resp.json()) == {"recovery_token", "expires_in"} and resp.json()["expires_in"] == 900
+    assert "fake-access" not in resp.text and "fake-refresh" not in resp.text
+
+
+def test_recovery_ticket_cannot_authenticate_normal_requests(client, signup, auth_provider):
+    signup()
+    _, ticket = _recovery_session(client, auth_provider)
+    assert client.get("/api/v1/users/me", headers=bearer(ticket)).status_code == 401
+    assert client.get("/api/v1/users/me/profile", headers=bearer(ticket)).status_code == 401
+
+
+def test_forged_or_expired_recovery_ticket_is_rejected(client, signup, auth_provider, monkeypatch):
+    from app.core import recovery_tokens
+
+    signup()
+    _, ticket = _recovery_session(client, auth_provider)
+    forged = client.post(f"{AUTH}/password/reset", headers=bearer(ticket[:-6] + "AAAAAA"), json={"password": NEW_PASSWORD})
+    assert forged.status_code == 401
+    monkeypatch.setattr(recovery_tokens, "RECOVERY_TTL_SECONDS", -1)
+    expired = client.post(f"{AUTH}/password/reset", headers=bearer(ticket), json={"password": NEW_PASSWORD})
+    assert expired.status_code == 401 and "expired" in expired.json()["detail"]
+    assert client.post(f"{AUTH}/login", json={"email": "ada@example.com", "password": PASSWORD}).status_code == 200
+
+
+def test_reset_email_redirects_to_frontend_reset_page(client, signup, auth_provider, monkeypatch):
+    from app.core.config import get_settings
+
+    signup()
+    monkeypatch.setenv("FRONTEND_URL", "http://localhost:3000/")
+    get_settings.cache_clear()
+    try:
+        client.post(f"{AUTH}/password/forgot", json={"email": "ada@example.com"})
+    finally:
+        monkeypatch.delenv("FRONTEND_URL")
+        get_settings.cache_clear()
+    assert auth_provider.reset_redirects == ["http://localhost:3000/reset-password"]
 
 
 def test_expired_and_invalid_recovery_links(client, signup, auth_provider):

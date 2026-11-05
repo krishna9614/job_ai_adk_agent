@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Response, status
 
 from app.api.deps import get_access_token, get_auth_service
+from app.core.recovery_tokens import RECOVERY_TTL_SECONDS
 from app.schemas.auth import (
     ConfirmEmailRequest,
     ConfirmEmailResponse,
@@ -84,8 +85,9 @@ def forgot_password(
 def start_recovery(
     body: RecoveryRequest, auth: AuthService = Depends(get_auth_service)
 ) -> RecoveryResponse:
-    """Consume the emailed reset link; the returned session may only be used to set a password."""
-    return RecoveryResponse(session=_session_payload(auth.start_password_recovery(body.token_hash)))
+    """Consume the emailed reset link; the returned ticket may only be used to set a password."""
+    ticket = auth.start_password_recovery(body.token_hash)
+    return RecoveryResponse(recovery_token=ticket, expires_in=RECOVERY_TTL_SECONDS)
 
 
 @router.post("/password/reset", response_model=MessageResponse)
