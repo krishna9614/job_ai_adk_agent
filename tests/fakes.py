@@ -1,9 +1,12 @@
+import base64
+import hashlib
 import secrets
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 from app.core.errors import (
+    RecoveryLinkExpiredError,
     AuthenticationError,
     ConflictError,
     InvalidTokenError,
@@ -39,6 +42,9 @@ class FakeAuthProvider:
         self._email_tokens: dict[str, tuple[str, uuid.UUID, str, datetime]] = {}
         self.outbox: list[SentEmail] = []
         self.reset_redirects: list[str | None] = []
+        # Supabase's PKCE flow starts when the email is sent and expires 5 minutes later.
+        self._pkce_flows: dict[str, tuple[str, datetime]] = {}  # email token_hash -> (challenge, started)
+        self._auth_codes: dict[str, tuple[uuid.UUID, str, datetime]] = {}  # code -> (user, challenge, started)
 
     # Helpers for tests -----------------------------------------------------------------------
 
@@ -47,6 +53,19 @@ class FakeAuthProvider:
 
     def last_email(self, type_: str) -> SentEmail:
         return next(m for m in reversed(self.outbox) if m.type == type_)
+
+    def open_default_reset_link(self, token_hash: str) -> str:
+        """What Supabase's {{ .ConfirmationURL }} does for a PKCE reset: consume the token, return ?code=."""
+        entry = self._email_tokens.pop(token_hash, None)
+        if entry is None or entry[0] != "recovery" or entry[3] < datetime.now(UTC):
+            raise InvalidTokenError("Email link is invalid or has expired")
+        code = secrets.token_hex(16)
+        self._auth_codes[code] = (entry[1], *self._pkce_flows.pop(token_hash))
+        return code
+
+    def age_reset_flows(self, seconds: int) -> None:
+        for key, (challenge, started) in self._pkce_flows.items():
+            self._pkce_flows[key] = (challenge, started - timedelta(seconds=seconds))
 
     def expire_email_tokens(self) -> None:
         for key, (t, aid, email, _) in self._email_tokens.items():
@@ -122,11 +141,25 @@ class FakeAuthProvider:
             raise AuthenticationError("Invalid or expired access token")
         return entry[0]
 
-    def send_password_reset(self, email: str, redirect_to: str | None = None) -> None:
+    def send_password_reset(
+        self, email: str, redirect_to: str | None = None, code_challenge: str | None = None
+    ) -> None:
         self.reset_redirects.append(redirect_to)
         account = self._accounts.get(email.lower())
         if account is not None:
             self._send("recovery", account, account.email)
+            if code_challenge:
+                self._pkce_flows[self.outbox[-1].token_hash] = (code_challenge, datetime.now(UTC))
+
+    def exchange_recovery_code(self, code: str, code_verifier: str) -> AuthResult:
+        entry = self._auth_codes.pop(code, None)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).rstrip(b"=").decode()
+        if entry is None or entry[1] != challenge:
+            raise InvalidTokenError("This link is invalid, has expired or has already been used")
+        if datetime.now(UTC) - entry[2] > timedelta(minutes=5):
+            raise RecoveryLinkExpiredError("This link expired (links last 5 minutes). Request a new one.")
+        session = self._issue(self._by_id(entry[0]), ("recovery",))
+        return AuthResult(identity=self._tokens[session.access_token][0], session=session)
 
     def resend_signup_confirmation(self, email: str) -> None:
         account = self._accounts.get(email.lower())

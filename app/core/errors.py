@@ -52,6 +52,18 @@ class InvalidTokenError(AppError):
     code = "invalid_token"
 
 
+class RecoveryStateError(InvalidTokenError):
+    """A PKCE reset link was opened without the verifier from the browser that requested it."""
+
+    code = "recovery_state_invalid"
+
+
+class RecoveryLinkExpiredError(InvalidTokenError):
+    """A PKCE reset link was opened more than 5 minutes after it was sent (Supabase flow state expiry)."""
+
+    code = "link_expired"
+
+
 class PasswordReusedError(AppError):
     status_code = 422
     code = "password_reused"

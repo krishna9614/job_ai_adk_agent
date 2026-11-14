@@ -21,6 +21,7 @@ from app.core.errors import (
     InvalidTokenError,
     PasswordReusedError,
     RateLimitedError,
+    RecoveryLinkExpiredError,
     ValidationFailedError,
 )
 
@@ -66,9 +67,15 @@ class AuthProvider(Protocol):
         """Return the identity for a valid access token or raise AuthenticationError."""
         ...
 
-    def send_password_reset(self, email: str, redirect_to: str | None = None) -> None: ...
+    def send_password_reset(
+        self, email: str, redirect_to: str | None = None, code_challenge: str | None = None
+    ) -> None: ...
 
     def resend_signup_confirmation(self, email: str) -> None: ...
+
+    def exchange_recovery_code(self, code: str, code_verifier: str) -> AuthResult:
+        """Swap the `?code=` from a PKCE reset link for its recovery session."""
+        ...
 
     def verify_email_token(self, token_hash: str, token_type: EmailTokenType) -> AuthResult | None:
         """Consume a one-time email link token; session is None while an email change is half-done."""
@@ -83,6 +90,8 @@ _SIGNUP_CONFLICT_CODES = {"user_already_exists", "email_exists"}
 _RATE_LIMIT_CODES = {"over_request_rate_limit", "over_email_send_rate_limit"}
 _VALIDATION_CODES = {"weak_password", "email_address_invalid", "validation_failed"}
 _INVALID_LINK_MESSAGE = "This link is invalid, has expired or has already been used"
+# Supabase expires a PKCE flow 5 minutes after the reset email is sent, whatever otp_expiry says.
+_PKCE_LINK_EXPIRED_MESSAGE = "This link expired (links last 5 minutes). Request a new one."
 
 
 def _unreachable(exc: httpx.HTTPError) -> AuthProviderUnavailableError:
@@ -172,16 +181,38 @@ class SupabaseAuthProvider:
         except httpx.HTTPError as exc:
             raise _unreachable(exc) from exc
 
-    def send_password_reset(self, email: str, redirect_to: str | None = None) -> None:
-        options = {"redirect_to": redirect_to} if redirect_to else {}
-        try:
-            self._new_client().auth.reset_password_for_email(email, options)
-        except AuthApiError as exc:
-            raise self._map_error(exc) from exc
-        except AuthError as exc:
-            raise AuthProviderUnavailableError("Authentication service error") from exc
-        except httpx.HTTPError as exc:
-            raise _unreachable(exc) from exc
+    def send_password_reset(
+        self, email: str, redirect_to: str | None = None, code_challenge: str | None = None
+    ) -> None:
+        # With a code_challenge (PKCE), Supabase's default {{ .ConfirmationURL }} link lands on
+        # redirect_to?code=... instead of putting the session in the URL fragment.
+        payload: dict = {"email": email}
+        if code_challenge:
+            payload |= {"code_challenge": code_challenge, "code_challenge_method": "s256"}
+        params = {"redirect_to": redirect_to} if redirect_to else None
+        resp, body = self._gotrue("POST", "recover", payload, params=params)
+        if resp.is_success:
+            return
+        if resp.status_code >= 500:
+            raise AuthProviderUnavailableError("Authentication service error")
+        code = body.get("error_code") or body.get("code")
+        message = body.get("msg") or body.get("message") or body.get("error_description") or "Request failed"
+        raise self._map_error(AuthApiError(message, resp.status_code, code if isinstance(code, str) else None))
+
+    def exchange_recovery_code(self, code: str, code_verifier: str) -> AuthResult:
+        resp, body = self._gotrue(
+            "POST", "token", {"auth_code": code, "code_verifier": code_verifier}, params={"grant_type": "pkce"}
+        )
+        if resp.status_code >= 500:
+            raise AuthProviderUnavailableError("Authentication service error")
+        if resp.status_code == 429:
+            raise RateLimitedError("Too many requests, try again later")
+        if body.get("error_code") == "flow_state_expired":
+            raise RecoveryLinkExpiredError(_PKCE_LINK_EXPIRED_MESSAGE)
+        if not resp.is_success:
+            raise InvalidTokenError(_INVALID_LINK_MESSAGE)
+        parsed = parse_auth_response(resp)
+        return AuthResult(identity=self._identity(parsed.user), session=self._session(parsed.session))
 
     def resend_signup_confirmation(self, email: str) -> None:
         try:
@@ -232,7 +263,13 @@ class SupabaseAuthProvider:
         raise self._map_error(exc)
 
     def _gotrue(
-        self, method: str, path: str, payload: dict, access_token: str | None = None
+        self,
+        method: str,
+        path: str,
+        payload: dict,
+        access_token: str | None = None,
+        *,
+        params: dict | None = None,
     ) -> tuple[httpx.Response, dict]:
         headers = {"apikey": self._anon_key}
         if access_token:
@@ -242,6 +279,7 @@ class SupabaseAuthProvider:
                 method,
                 f"{self._url.rstrip('/')}/auth/v1/{path}",
                 json=payload,
+                params=params,
                 headers=headers,
                 timeout=15,
             )
