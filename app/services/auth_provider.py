@@ -21,6 +21,7 @@ from app.core.errors import (
     InvalidTokenError,
     PasswordReusedError,
     RateLimitedError,
+    RecoveryLinkExpiredError,
     ValidationFailedError,
 )
 
@@ -89,6 +90,8 @@ _SIGNUP_CONFLICT_CODES = {"user_already_exists", "email_exists"}
 _RATE_LIMIT_CODES = {"over_request_rate_limit", "over_email_send_rate_limit"}
 _VALIDATION_CODES = {"weak_password", "email_address_invalid", "validation_failed"}
 _INVALID_LINK_MESSAGE = "This link is invalid, has expired or has already been used"
+# Supabase expires a PKCE flow 5 minutes after the reset email is sent, whatever otp_expiry says.
+_PKCE_LINK_EXPIRED_MESSAGE = "This link expired (links last 5 minutes). Request a new one."
 
 
 def _unreachable(exc: httpx.HTTPError) -> AuthProviderUnavailableError:
@@ -197,13 +200,15 @@ class SupabaseAuthProvider:
         raise self._map_error(AuthApiError(message, resp.status_code, code if isinstance(code, str) else None))
 
     def exchange_recovery_code(self, code: str, code_verifier: str) -> AuthResult:
-        resp, _ = self._gotrue(
+        resp, body = self._gotrue(
             "POST", "token", {"auth_code": code, "code_verifier": code_verifier}, params={"grant_type": "pkce"}
         )
         if resp.status_code >= 500:
             raise AuthProviderUnavailableError("Authentication service error")
         if resp.status_code == 429:
             raise RateLimitedError("Too many requests, try again later")
+        if body.get("error_code") == "flow_state_expired":
+            raise RecoveryLinkExpiredError(_PKCE_LINK_EXPIRED_MESSAGE)
         if not resp.is_success:
             raise InvalidTokenError(_INVALID_LINK_MESSAGE)
         parsed = parse_auth_response(resp)

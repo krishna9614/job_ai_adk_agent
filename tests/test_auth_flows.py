@@ -217,6 +217,16 @@ def test_pkce_link_needs_the_requesting_browsers_state(client, signup, auth_prov
     assert wrong.status_code == 400 and wrong.json()["code"] == "invalid_token"
 
 
+def test_pkce_link_opened_after_five_minutes_says_so(client, signup, auth_provider):
+    signup()
+    state = client.post(f"{AUTH}/password/forgot", json={"email": "ada@example.com"}).json()["recovery_state"]
+    auth_provider.age_reset_flows(301)
+    code = auth_provider.open_default_reset_link(auth_provider.last_email("recovery").token_hash)
+    resp = client.post(f"{AUTH}/password/recovery", json={"code": code, "recovery_state": state})
+    assert resp.status_code == 400
+    assert resp.json() == {"detail": "This link expired (links last 5 minutes). Request a new one.", "code": "link_expired"}
+
+
 def test_recovery_state_is_not_a_reset_ticket(client, signup, auth_provider):
     signup()
     state, _ = _forgot(client, auth_provider)

@@ -56,8 +56,10 @@ tests/             pytest (Supabase mocked, real test database)
   `{code, recovery_state}` exchanges it (`/token?grant_type=pkce`) for the same 15-minute ticket.
   The link only works in the browser that requested it: without its `recovery_state` the API
   returns `400 {"code":"recovery_state_invalid"}`; a wrong, used or expired code returns
-  `400 {"code":"invalid_token"}`. Email link scanners that open the link first still use it up;
-  the `token_hash` template below avoids both limits.
+  `400 {"code":"invalid_token"}`. Supabase expires the PKCE flow **5 minutes after the email is
+  sent** (regardless of `otp_expiry`); a later click returns `400 {"code":"link_expired"}`. Email
+  link scanners that open the link first still use it up; the `token_hash` template below avoids
+  all three limits.
 - `forgot` and `resend` always return the same `202` message, whether or not the email is
   registered.
 
