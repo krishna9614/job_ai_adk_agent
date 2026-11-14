@@ -6,6 +6,7 @@ from app.schemas.auth import (
     ConfirmEmailRequest,
     ConfirmEmailResponse,
     EmailRequest,
+    ForgotPasswordResponse,
     LoginRequest,
     LoginResponse,
     MessageResponse,
@@ -72,13 +73,13 @@ def logout(
 
 
 @router.post(
-    "/password/forgot", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED
+    "/password/forgot", response_model=ForgotPasswordResponse, status_code=status.HTTP_202_ACCEPTED
 )
 def forgot_password(
     body: EmailRequest, auth: AuthService = Depends(get_auth_service)
-) -> MessageResponse:
-    auth.request_password_reset(body.email)
-    return MessageResponse(detail=_RESET_SENT)
+) -> ForgotPasswordResponse:
+    state = auth.request_password_reset(body.email)
+    return ForgotPasswordResponse(detail=_RESET_SENT, recovery_state=state)
 
 
 @router.post("/password/recovery", response_model=RecoveryResponse)
@@ -86,7 +87,9 @@ def start_recovery(
     body: RecoveryRequest, auth: AuthService = Depends(get_auth_service)
 ) -> RecoveryResponse:
     """Consume the emailed reset link; the returned ticket may only be used to set a password."""
-    ticket = auth.start_password_recovery(body.token_hash)
+    ticket = auth.start_password_recovery(
+        body.token_hash, code=body.code, recovery_state=body.recovery_state
+    )
     return RecoveryResponse(recovery_token=ticket, expires_in=RECOVERY_TTL_SECONDS)
 
 

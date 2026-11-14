@@ -11,9 +11,16 @@ from app.core.errors import (
     ConflictError,
     ForbiddenError,
     InvalidTokenError,
+    RecoveryStateError,
     ValidationFailedError,
 )
-from app.core.recovery_tokens import open_recovery_token, seal_recovery_token
+from app.core.recovery_tokens import (
+    new_pkce_pair,
+    open_recovery_state,
+    open_recovery_token,
+    seal_recovery_state,
+    seal_recovery_token,
+)
 from app.models import User
 from app.repositories.profile_repository import ProfileRepository
 from app.schemas.auth import split_full_name
@@ -76,12 +83,19 @@ class AuthService:
 
     # Email links -----------------------------------------------------------------------------
 
-    def request_password_reset(self, email: str) -> None:
-        """Always succeeds from the caller's view so responses never reveal registered emails."""
+    def request_password_reset(self, email: str) -> str:
+        """Send a PKCE reset email and return the sealed verifier (recovery state).
+
+        Always succeeds from the caller's view, and the state is returned for unknown emails too,
+        so responses never reveal registered emails.
+        """
+        verifier, challenge = new_pkce_pair()
         redirect_to = _reset_redirect_url()
         self._quietly(
-            lambda: self.provider.send_password_reset(email, redirect_to=redirect_to), "password reset"
+            lambda: self.provider.send_password_reset(email, redirect_to=redirect_to, code_challenge=challenge),
+            "password reset",
         )
+        return seal_recovery_state(verifier)
 
     def resend_verification(self, email: str) -> None:
         self._quietly(lambda: self.provider.resend_signup_confirmation(email), "verification resend")
@@ -95,13 +109,26 @@ class AuthService:
         )
         return AuthOutcome(user=user, session=result.session)
 
-    def start_password_recovery(self, token_hash: str) -> str:
+    def start_password_recovery(
+        self, token_hash: str | None = None, *, code: str | None = None, recovery_state: str | None = None
+    ) -> str:
         """Exchange a one-time recovery link for a sealed 15-minute ticket that can only set a password.
 
-        The Supabase recovery session stays inside the backend, so it can never be used to call
-        other endpoints.
+        `token_hash` comes from a custom email template; `code` from Supabase's default template
+        (PKCE), which also needs the recovery state of the browser that asked for the email. The
+        Supabase recovery session stays inside the backend, so it can never call other endpoints.
         """
-        result = self.provider.verify_email_token(token_hash, "recovery")
+        if code is not None:
+            verifier = open_recovery_state(recovery_state) if recovery_state else None
+            if verifier is None:
+                raise RecoveryStateError(
+                    "Open the reset link in the same browser you used to request it, or request a new link."
+                )
+            result = self.provider.exchange_recovery_code(code, verifier)
+        elif token_hash is not None:
+            result = self.provider.verify_email_token(token_hash, "recovery")
+        else:
+            raise InvalidTokenError("This link is invalid, has expired or has already been used")
         if result is None or result.session is None:
             raise InvalidTokenError("This link is invalid, has expired or has already been used")
         self.user_service.sync_authenticated_user(result.identity)

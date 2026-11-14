@@ -1,7 +1,7 @@
 import re
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, EmailStr, Field, StringConstraints, model_validator
 
 from app.schemas.user import UserRead
 
@@ -82,7 +82,18 @@ class ConfirmEmailRequest(BaseModel):
 
 
 class RecoveryRequest(BaseModel):
-    token_hash: TokenHash
+    """Either the `token_hash` of a custom-template link, or the `?code=` of a default (PKCE) link
+    plus the `recovery_state` returned by POST /auth/password/forgot."""
+
+    token_hash: TokenHash | None = None
+    code: TokenHash | None = None
+    recovery_state: Annotated[str, StringConstraints(max_length=1024)] | None = None
+
+    @model_validator(mode="after")
+    def _one_link_kind(self) -> "RecoveryRequest":
+        if (self.token_hash is None) == (self.code is None):
+            raise ValueError("Provide either token_hash or code")
+        return self
 
 
 class PasswordResetRequest(BaseModel):
@@ -125,3 +136,8 @@ class RecoveryResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     detail: str
+
+
+class ForgotPasswordResponse(MessageResponse):
+    # Sealed PKCE verifier; keep it (HttpOnly) and send it back with the link's ?code=.
+    recovery_state: str

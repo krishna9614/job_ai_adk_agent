@@ -82,7 +82,8 @@ def test_forgot_password_does_not_reveal_registration(client, signup, auth_provi
     known = client.post(f"{AUTH}/password/forgot", json={"email": "ada@example.com"})
     unknown = client.post(f"{AUTH}/password/forgot", json={"email": "nobody@example.com"})
     assert known.status_code == unknown.status_code == 202
-    assert known.json() == unknown.json()
+    assert known.json()["detail"] == unknown.json()["detail"]
+    assert set(known.json()) == set(unknown.json()) == {"detail", "recovery_state"}
     assert [m.to for m in auth_provider.outbox if m.type == "recovery"] == ["ada@example.com"]
     assert client.post(f"{AUTH}/password/forgot", json={"email": "not-an-email"}).status_code == 422
 
@@ -179,6 +180,53 @@ def test_reset_email_redirects_to_frontend_reset_page(client, signup, auth_provi
         monkeypatch.delenv("FRONTEND_URL")
         get_settings.cache_clear()
     assert auth_provider.reset_redirects == ["http://localhost:3000/reset-password"]
+
+
+def _forgot(client, auth_provider, email="ada@example.com"):
+    state = client.post(f"{AUTH}/password/forgot", json={"email": email}).json()["recovery_state"]
+    return state, auth_provider.open_default_reset_link(auth_provider.last_email("recovery").token_hash)
+
+
+def test_default_template_pkce_link_resets_password(client, signup, auth_provider):
+    signup()
+    state, code = _forgot(client, auth_provider)
+    resp = client.post(f"{AUTH}/password/recovery", json={"code": code, "recovery_state": state})
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) == {"recovery_token", "expires_in"} and "fake-" not in resp.text
+    ticket = resp.json()["recovery_token"]
+    assert client.get("/api/v1/users/me", headers=bearer(ticket)).status_code == 401
+    assert client.post(f"{AUTH}/password/reset", headers=bearer(ticket), json={"password": NEW_PASSWORD}).status_code == 200
+    assert client.post(f"{AUTH}/login", json={"email": "ada@example.com", "password": NEW_PASSWORD}).status_code == 200
+    reused = client.post(f"{AUTH}/password/recovery", json={"code": code, "recovery_state": state})
+    assert reused.status_code == 400 and reused.json()["code"] == "invalid_token"
+
+
+def test_pkce_link_needs_the_requesting_browsers_state(client, signup, auth_provider):
+    signup()
+    other_state, _ = _forgot(client, auth_provider)
+    state, code = _forgot(client, auth_provider)
+    missing = client.post(f"{AUTH}/password/recovery", json={"code": code})
+    assert missing.status_code == 400 and missing.json()["code"] == "recovery_state_invalid"
+    forged = client.post(f"{AUTH}/password/recovery", json={"code": code, "recovery_state": state[:-6] + "AAAAAA"})
+    assert forged.status_code == 400 and forged.json()["code"] == "recovery_state_invalid"
+    # A ticket is not a recovery state, and another request's state does not match this link.
+    _, ticket = _recovery_session(client, auth_provider)
+    as_state = client.post(f"{AUTH}/password/recovery", json={"code": code, "recovery_state": ticket})
+    assert as_state.json()["code"] == "recovery_state_invalid"
+    wrong = client.post(f"{AUTH}/password/recovery", json={"code": code, "recovery_state": other_state})
+    assert wrong.status_code == 400 and wrong.json()["code"] == "invalid_token"
+
+
+def test_recovery_state_is_not_a_reset_ticket(client, signup, auth_provider):
+    signup()
+    state, _ = _forgot(client, auth_provider)
+    assert client.post(f"{AUTH}/password/reset", headers=bearer(state), json={"password": NEW_PASSWORD}).status_code == 401
+
+
+def test_recovery_request_takes_exactly_one_link_kind(client):
+    assert client.post(f"{AUTH}/password/recovery", json={}).status_code == 422
+    both = {"token_hash": "abc", "code": "def", "recovery_state": "x"}
+    assert client.post(f"{AUTH}/password/recovery", json=both).status_code == 422
 
 
 def test_expired_and_invalid_recovery_links(client, signup, auth_provider):
