@@ -86,9 +86,18 @@ def test_preferences_default_then_upsert(client, token):
     assert body["recruiter_visibility"] is True and body["willing_to_relocate"] is True
 
 
+def test_salary_bounds_compare_exactly(client, token):
+    base = {"salary_currency": "USD", "salary_period": "hourly"}
+    assert client.patch(ME + "/preferences", headers=bearer(token), json={**base, "minimum_salary": 20, "maximum_salary": 25.10}).status_code == 200
+    resp = client.patch(ME + "/preferences", headers=bearer(token), json={"minimum_salary": 25.1})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["minimum_salary"] == 25.1
+
+
 @pytest.mark.parametrize(
     "payload",
     [
+        {"minimum_salary": 1.234, "salary_currency": "USD", "salary_period": "yearly"},
         {"minimum_salary": 10, "maximum_salary": 5, "salary_currency": "USD", "salary_period": "yearly"},
         {"minimum_salary": 10},
         {"employment_status": "retired"},

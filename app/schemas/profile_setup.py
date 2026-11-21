@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Annotated, Generic, Literal, Self, TypeVar
 
 from pydantic import (
@@ -49,7 +50,7 @@ Currency = Annotated[
     StringConstraints(strip_whitespace=True, pattern=r"^[A-Za-z]{3}$"),
     AfterValidator(lambda v: v.upper() if v else v),
 ]
-Salary = Annotated[float | None, Field(ge=0, le=999_999_999_999)]
+Salary = Annotated[Decimal | None, Field(ge=0, max_digits=14, decimal_places=2)]
 Year = Annotated[int | None, Field(ge=1900, le=2200)]
 
 
