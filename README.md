@@ -76,6 +76,22 @@ tests/             pytest (Supabase mocked, real test database)
 | `POST /auth/email/confirm` | — | `{token_hash, type: signup\|email\|email_change}` → session |
 | `POST /users/me/email-change` | Bearer | `{email}` → sends confirmation link(s) |
 
+Profile setup (all Bearer, always scoped to the caller):
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET/POST/PATCH /users/me/profile` | Basic info, links, total experience, career gap, work authorization |
+| `GET/PATCH /users/me/preferences` | Employment status, roles, locations, work types, salary, notice, relocation, recruiter visibility, daily digest. `PATCH` creates the record on first save |
+| `GET/PUT /users/me/experience` | Full list of roles |
+| `GET/PUT /users/me/skills` | `{items: [{name, category: technical\|soft\|tool}]}`, stored in the shared `skills` catalogue |
+| `GET/PUT /users/me/education` | Education level code, degree, institution, start/end year |
+| `GET/PUT /users/me/certifications` | Certifications |
+| `GET/PUT /users/me/languages` | Languages with proficiency |
+| `PATCH /users/me/onboarding` | `{onboarding_step, onboarding_status}`; `completed` stays completed |
+
+`PUT` takes the whole list as `{items: [...]}`: items with an `id` are updated, items without
+one are added, and saved items left out are deleted.
+
 ### Supabase setup
 
 1. Create a Supabase project. In **Authentication → Sign In / Providers**, enable **Email**.
@@ -106,6 +122,8 @@ publishable key; emails land in Mailpit at http://127.0.0.1:54324.
 ## Local setup
 
 Requires Python 3.13 and PostgreSQL 18, with `jobai_db` already created from `db/jobai_v1_schema.sql`.
+A database created from an older copy of the schema must also run the scripts in `db/migrations/`
+in order (rerunning the schema file alone never adds columns to existing tables).
 
 ```bash
 python3.13 -m venv .venv

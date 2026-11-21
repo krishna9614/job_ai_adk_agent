@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     AfterValidator,
@@ -38,6 +38,10 @@ CountryCode = Annotated[
 ]
 
 
+CareerGap = Literal["none", "under_6_months", "6_to_12_months", "over_1_year"]
+WorkAuthorizationStatus = Literal["citizen", "permanent_resident", "work_visa", "student_visa", "other"]
+
+
 class _ProfileFields(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -63,6 +67,11 @@ class _ProfileFields(BaseModel):
     ] = None
     linkedin_url: Url = None
     github_url: Url = None
+    portfolio_url: Url = None
+    total_experience_years: Annotated[float | None, Field(ge=0, le=60)] = None
+    career_gap: CareerGap | None = None
+    work_authorization_status: WorkAuthorizationStatus | None = None
+    work_authorization_country: CountryCode = None
 
 
 class ProfileCreate(_ProfileFields):
@@ -100,5 +109,10 @@ class ProfileRead(BaseModel):
     professional_summary: str | None
     linkedin_url: str | None
     github_url: str | None
+    portfolio_url: str | None
+    total_experience_years: float | None
+    career_gap: str | None
+    work_authorization_status: str | None
+    work_authorization_country: str | None
     created_at: datetime
     updated_at: datetime

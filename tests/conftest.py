@@ -1,7 +1,8 @@
 """Test fixtures.
 
 Database tests run against a dedicated database named by TEST_DATABASE_URL (must contain
-"test"). The tables are created from db/jobai_v1_schema.sql, which is idempotent.
+"test"). The tables are created from db/jobai_v1_schema.sql, then db/migrations/*.sql are
+applied so a test database built from an older schema is upgraded; all scripts are idempotent.
 Supabase Auth is replaced by tests.fakes.FakeAuthProvider.
 """
 
@@ -19,7 +20,9 @@ from tests.fakes import FakeAuthProvider
 
 load_dotenv()
 
-SCHEMA_SQL = Path(__file__).resolve().parents[1] / "db" / "jobai_v1_schema.sql"
+DB_DIR = Path(__file__).resolve().parents[1] / "db"
+SCHEMA_SQL = DB_DIR / "jobai_v1_schema.sql"
+MIGRATIONS = sorted((DB_DIR / "migrations").glob("*.sql"))
 
 
 @pytest.fixture(scope="session")
@@ -34,7 +37,8 @@ def engine():
     os.environ["DATABASE_URL"] = url
 
     with psycopg.connect(parsed.set(drivername="postgresql").render_as_string(False)) as conn:
-        conn.execute(SCHEMA_SQL.read_text())
+        for script in [SCHEMA_SQL, *MIGRATIONS]:
+            conn.execute(script.read_text())
 
     eng = create_engine(url)
     yield eng
