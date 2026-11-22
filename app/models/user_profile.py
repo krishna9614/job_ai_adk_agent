@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import CHAR, ForeignKey, String, Text, func
+from sqlalchemy import CHAR, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -29,6 +30,11 @@ class UserProfile(Base):
     professional_summary: Mapped[str | None] = mapped_column(Text)
     linkedin_url: Mapped[str | None] = mapped_column(Text)
     github_url: Mapped[str | None] = mapped_column(Text)
+    portfolio_url: Mapped[str | None] = mapped_column(Text)
+    total_experience_years: Mapped[Decimal | None] = mapped_column(Numeric(4, 1))
+    career_gap: Mapped[str | None] = mapped_column(String(20))
+    work_authorization_status: Mapped[str | None] = mapped_column(String(30))
+    work_authorization_country: Mapped[str | None] = mapped_column(CHAR(2))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )

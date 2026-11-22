@@ -1,4 +1,4 @@
--- JobAI v1.0 — 17-table initial release schema
+-- JobAI v1.0 — 19-table initial release schema
 -- Run in pgAdmin Query Tool while connected to jobai_db.
 -- This script is transactional and safe to rerun (existing tables are not replaced).
 BEGIN;
@@ -31,6 +31,14 @@ CREATE TABLE IF NOT EXISTS jobai.user_profiles (
  professional_headline VARCHAR(250), professional_summary TEXT,
  linkedin_url TEXT, github_url TEXT, portfolio_url TEXT, profile_photo_path TEXT,
  timezone VARCHAR(64),
+ total_experience_years NUMERIC(4,1)
+   CONSTRAINT user_profiles_total_experience_chk CHECK (total_experience_years IS NULL OR total_experience_years BETWEEN 0 AND 60),
+ career_gap VARCHAR(20)
+   CONSTRAINT user_profiles_career_gap_chk CHECK (career_gap IN ('none','under_6_months','6_to_12_months','over_1_year')),
+ work_authorization_status VARCHAR(30)
+   CONSTRAINT user_profiles_work_auth_status_chk CHECK (work_authorization_status IN ('citizen','permanent_resident','work_visa','student_visa','other')),
+ work_authorization_country CHAR(2)
+   CONSTRAINT user_profiles_work_auth_country_chk CHECK (work_authorization_country ~ '^[A-Z]{2}$'),
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  CONSTRAINT user_profiles_first_name_nonempty CHECK (length(trim(first_name)) > 0)
 );
@@ -108,6 +116,31 @@ CREATE TABLE IF NOT EXISTS jobai.user_skills (
 );
 CREATE INDEX IF NOT EXISTS user_skills_skill_idx ON jobai.user_skills(skill_id);
 
+CREATE TABLE IF NOT EXISTS jobai.user_certifications (
+ id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id UUID NOT NULL REFERENCES jobai.users(id) ON DELETE CASCADE,
+ certification_name VARCHAR(250) NOT NULL,
+ issuing_organization VARCHAR(250),
+ issue_date DATE, expiry_date DATE,
+ credential_id VARCHAR(200), credential_url TEXT,
+ display_order SMALLINT NOT NULL DEFAULT 0,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ CHECK (length(trim(certification_name)) > 0),
+ CHECK (expiry_date IS NULL OR issue_date IS NULL OR expiry_date >= issue_date)
+);
+CREATE INDEX IF NOT EXISTS user_certifications_user_idx ON jobai.user_certifications(user_id,display_order);
+
+CREATE TABLE IF NOT EXISTS jobai.user_languages (
+ id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id UUID NOT NULL REFERENCES jobai.users(id) ON DELETE CASCADE,
+ language_name VARCHAR(100) NOT NULL,
+ proficiency_level VARCHAR(20) NOT NULL CHECK (proficiency_level IN ('basic','conversational','intermediate','professional','native')),
+ display_order SMALLINT NOT NULL DEFAULT 0,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ CHECK (length(trim(language_name)) > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS user_languages_user_name_ci_uq ON jobai.user_languages(user_id,lower(language_name));
+
 CREATE TABLE IF NOT EXISTS jobai.job_preferences (
  user_id UUID PRIMARY KEY REFERENCES jobai.users(id) ON DELETE CASCADE,
  preferred_job_titles JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -119,6 +152,10 @@ CREATE TABLE IF NOT EXISTS jobai.job_preferences (
  notice_period_days INTEGER, available_from DATE,
  willing_to_relocate BOOLEAN, requires_visa_sponsorship BOOLEAN,
  minimum_match_score NUMERIC(5,2) NOT NULL DEFAULT 60,
+ employment_status VARCHAR(20)
+   CONSTRAINT job_preferences_employment_status_chk CHECK (employment_status IN ('student','fresher','employed','actively_looking')),
+ recruiter_visibility BOOLEAN NOT NULL DEFAULT false,
+ daily_job_match_digest BOOLEAN NOT NULL DEFAULT false,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  CHECK (jsonb_typeof(preferred_job_titles)='array'),
  CHECK (jsonb_typeof(preferred_locations)='array'),
@@ -268,7 +305,7 @@ CREATE INDEX IF NOT EXISTS ai_usage_user_time_idx ON jobai.ai_usage(user_id,crea
 CREATE OR REPLACE FUNCTION jobai.touch_updated_at() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN NEW.updated_at = now(); RETURN NEW; END; $$;
 DO $$ DECLARE tab TEXT; BEGIN
- FOREACH tab IN ARRAY ARRAY['users','user_profiles','user_education','user_experience','job_preferences','resumes','job_listings','job_applications'] LOOP
+ FOREACH tab IN ARRAY ARRAY['users','user_profiles','user_education','user_experience','job_preferences','user_certifications','user_languages','resumes','job_listings','job_applications'] LOOP
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'touch_updated_at_' || tab AND tgrelid = ('jobai.' || tab)::regclass) THEN
    EXECUTE format('CREATE TRIGGER %I BEFORE UPDATE ON jobai.%I FOR EACH ROW EXECUTE FUNCTION jobai.touch_updated_at()', 'touch_updated_at_' || tab,tab);
   END IF;
@@ -280,7 +317,7 @@ END $$;
 -- Cross-user resume references (e.g. job_matches.resume_id) also require backend ownership validation.
 COMMIT;
 
--- Check: should return 17.
+-- Check: should return 19.
 SELECT count(*) AS jobai_table_count
 FROM information_schema.tables
 WHERE table_schema='jobai' AND table_type='BASE TABLE';
